@@ -100,14 +100,17 @@ def mad_max(coverage, cutoff=5):
     cutoff = np.exp(med_logNzMarg - cutoff * dev_logNzMarg)
     return np.where(coverage < cutoff)
 
-def CTALE_norm_iterative(mtx, ROI_start, ROI_end, resolution, mult=1.54,
-                         steps=20, tolerance=10**-5, mad_cutoff=5, ignore_diags=2):
+def CTALE_norm_iterative(mtx, ROI_start, ROI_end, resolution, mult=1.54, max_dist=3e6,
+                         steps=20, tolerance=10**-5, mad_cutoff=5, ignore_diags=2,
+                         norm_sum_to_one=False):
     """Main function that perform normalization until variance>tolerance
     mtx - matrix of individual chromosome/region +/- distance
     ROI_start - first coordinate of C-TALE region(bp)
     ROI_end - last coordinate of C-TALE region(bp)
     resolution - C-TALE map resolution(bp)
     mult - coefficient of multiplication around ROI, default=1.54
+    max_dist - longest interactions to consider for balancing, by default: 3 Mbp;
+               set to 0 to use all distances
     steps - number of iterations, by default=20
     tolerance - when variance<tolerance algorithm stops.
     mad_cutoff - MAD filter value
@@ -117,20 +120,26 @@ def CTALE_norm_iterative(mtx, ROI_start, ROI_end, resolution, mult=1.54,
     start_bin = ROI_start//resolution
     end_bin = ROI_end//resolution
 
+    max_dist_bin = int(max_dist//resolution)
+
     if ignore_diags > 0:
         for diag in range(ignore_diags):
             mtx.setdiag(0, diag)
             if diag != 0:
                 mtx.setdiag(0, -diag)
 
+    if max_dist > 0:
+        mtx -= sparse.triu(mtx, max_dist_bin+1)
+    mtx.eliminate_zeros()
+
     cov = get_cov(mtx, start_bin, end_bin)
     bad_bins = mad_max(cov[start_bin:end_bin+1], mad_cutoff)+start_bin
     weights = np.ones_like(cov)
     if len(bad_bins)>0.5*(end_bin-start_bin): # If more than half of bins are filtered, don't even try and set weights to 1
         logging.warn('Too few good bins')
-        return weights, False
+        return weights, False, 0
     weights[bad_bins] = np.nan
-
+    converged = False
     for i in range(steps):
         cov = get_cov(mtx.multiply(weights).multiply(weights[np.newaxis].T).tocsr(),
                                start_bin, end_bin)
@@ -139,19 +148,26 @@ def CTALE_norm_iterative(mtx, ROI_start, ROI_end, resolution, mult=1.54,
         logging.info('Iteration %s: var: %s' % (i, var))
         if var < tolerance:
             logging.info('Variance below %s' % tolerance)
-            cov = get_cov(mtx, start_bin, end_bin, norm=False)[start_bin:end_bin+1]
-            weights /= cov.mean()*2#**0.5
-            weights = weights**0.5
-            weights[:start_bin] *= mult
-            weights[end_bin+1:] *= mult
+            converged = True
+            break
 #            mtx = mtx.multiply(weights).multiply(weights[np.newaxis].T).tocsr()
-            return weights, True
         else:
             cov = (cov-1)*0.8 + 1
             weights = weights/cov
             continue
-    logging.warn('Too many iterations without convergence')
-    return weights, False
+
+    cov = get_cov(mtx.multiply(weights).multiply(weights[np.newaxis].T).tocsr(),
+              start_bin, end_bin, norm=False)[start_bin:end_bin+1]
+    weights /= cov.mean()**0.5
+    # weights = weights**0.5
+    weights[:start_bin] *= mult
+    weights[end_bin+1:] *= mult
+    if not converged:
+        logging.warn('Too many iterations without convergence')
+
+    return weights, converged, i
+
+
 
 
 #def get_pixels(mtx, zero_id=0):
@@ -162,12 +178,12 @@ def CTALE_norm_iterative(mtx, ROI_start, ROI_end, resolution, mult=1.54,
 #                           'count': sc.data})
 #    return pixels
 
-def save_weight(coolfile, chroms, weights, bal_info={}):
+def save_weight(coolfile, chroms, weights, bal_info={}, col_name='weight'):
     """
     coolfile - File to add weights too
     chroms - List of chromosomes to modify
     weights - List of weight vectors to write to corresponding chromosomes
-    bal_info - List of dicts to add as attributes of the weight column"""
+    bal_info - Dict to add as attributes of the weight column"""
     cool_path, group_path = util.parse_cooler_uri(coolfile)
     c = cooler.Cooler(coolfile)
     with h5py.File(cool_path, 'r+') as h5:
@@ -175,12 +191,12 @@ def save_weight(coolfile, chroms, weights, bal_info={}):
         # add the bias column to the file
         h5opts = dict(compression='gzip', compression_opts=6)
         allweights = np.asarray([np.nan]*grp['bins']['chrom'].shape[0])
-        if 'weight' not in grp['bins'].keys():
-            grp['bins'].create_dataset('weight', data=allweights, **h5opts)
-        for chrom, weight, info in zip(chroms, weights, bal_info):
+        if col_name not in grp['bins'].keys():
+            grp['bins'].create_dataset(col_name, data=allweights, **h5opts)
+        for chrom, weight in zip(chroms, weights):
             s, e = c.extent(chrom)
-            grp['bins']['weight'][s:e] = weight
-            grp['bins']['weight'].attrs.update(info)
+            grp['bins'][col_name][s:e] = weight
+            grp['bins'][col_name].attrs.update(bal_info)
 
 #        grp['bins']['weight'][grp['bins']['chrom']==chrom]=weights
     return

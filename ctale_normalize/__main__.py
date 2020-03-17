@@ -35,6 +35,9 @@ def main():
     parser.add_argument("--ignore_diags", type=int, default=2,
                     required=False,
                     help="""How many diagonals to ignore for iterative correction""")
+    parser.add_argument("--max_dist", type=int, default=3e6,
+                    required=False,
+                    help="""Longest interactions to include into balancing""")
 #    parser.add_argument("output", type=str,
 #                        help="Where to save the output")
 
@@ -59,20 +62,27 @@ def main():
         logging.info('Loaded matrix for %s' % chrom)
         #Perform normalization
         logging.info('Normalization...')
-        weight, converged = CTALE_norm_iterative(mtx, start, end,
+        weight, converged, n_iter = CTALE_norm_iterative(mtx, start, end,
                                                         C.binsize,
                                                         steps=args.IC_steps,
                                                         mult=args.mult_factor,
+                                                        max_dist=args.max_dist,
                                                         tolerance=args.tolerance,
                                                         mad_cutoff=args.MAD_max,
                                                         ignore_diags=args.ignore_diags)
-        info = {'tol':args.tolerance,
-                'mad_max':args.MAD_max,
-                'converged':converged}
+        bal_info.append({f'{region} converged':converged,
+                         f'{region} N_iter':n_iter})
         chroms.append(chrom)
         weights.append(weight)
-        bal_info.append(info)
-    save_weight(args.cooler, chroms, weights, bal_info)
+    info = {'tol':args.tolerance,
+            'mad_max':args.MAD_max,
+            "regions":regions,
+            'mult_factor':args.mult_factor,
+            'max_dist':args.max_dist,
+            'ignore_diags':args.ignore_diags}
+    for i in bal_info:
+        info.update(i)
+    save_weight(args.cooler, chroms, weights, info)
 #    logging.info('Saving as '+ args.output)
     #Save_coolfile
 #    logging.info('Finished!')
